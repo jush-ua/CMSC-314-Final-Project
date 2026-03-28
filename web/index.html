@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OS Simulator Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="topbar">
+        <div>
+          <p class="kicker">Operating System Simulator</p>
+          <h1>Dashboard for processes, memory, scheduling, and files.</h1>
+        </div>
+        <div class="topbar-actions">
+          <button class="button button-secondary" id="load-demo">Load Demo</button>
+          <button class="button button-ghost" id="reset-sim">Reset</button>
+        </div>
+      </header>
+
+      <section class="hero-card">
+        <div class="hero-copy">
+          <p class="hero-lead">
+            Group 2 - CMSC 314 Final Project
+          </p>
+          <div class="status-strip">
+            <span class="status-chip" id="clock-pill">Clock 0</span>
+            <span class="status-chip" id="scheduler-pill">Scheduler RR</span>
+            <span class="status-chip" id="running-pill">CPU Idle</span>
+          </div>
+        </div>
+        <div class="hero-meta">
+          <div class="meta-block">
+            <span class="meta-label">Simulation Model</span>
+            <strong>FCFS + Round Robin</strong>
+          </div>
+          <div class="meta-block">
+            <span class="meta-label">Memory Pool</span>
+            <strong>256 Units</strong>
+          </div>
+          <div class="meta-block">
+            <span class="meta-label">Interaction Style</span>
+            <strong>Direct Controls</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="overview-grid">
+        <article class="metric-card metric-strong">
+          <span>Total Processes</span>
+          <strong id="stat-total-processes">0</strong>
+        </article>
+        <article class="metric-card">
+          <span>Ready Queue</span>
+          <strong id="stat-ready">0</strong>
+        </article>
+        <article class="metric-card">
+          <span>Waiting</span>
+          <strong id="stat-waiting">0</strong>
+        </article>
+        <article class="metric-card">
+          <span>Files</span>
+          <strong id="stat-files">0</strong>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <aside class="control-rail">
+          <article class="surface control-card">
+            <div class="section-heading">
+              <h2>CPU Control</h2>
+              <p>Advance the system and switch scheduling strategies.</p>
+            </div>
+            <label class="field">
+              <span>Scheduler</span>
+              <div class="inline-field">
+                <select id="scheduler-select">
+                  <option value="rr">Round Robin</option>
+                  <option value="fcfs">FCFS</option>
+                </select>
+                <button class="button button-secondary" id="set-scheduler">Apply</button>
+              </div>
+            </label>
+            <div class="quick-actions tick-buttons">
+              <button class="button button-soft" data-steps="1">Tick 1</button>
+              <button class="button button-soft" data-steps="3">Tick 3</button>
+              <button class="button button-soft" data-steps="5">Tick 5</button>
+            </div>
+            <label class="field">
+              <span>Custom Tick Count</span>
+              <div class="inline-field">
+                <input id="custom-ticks" type="number" min="1" value="2" />
+                <button class="button button-primary" id="tick-custom">Run</button>
+              </div>
+            </label>
+          </article>
+
+          <article class="surface control-card">
+            <div class="section-heading">
+              <h2>Create Process</h2>
+              <p>Add a workload with memory demand and CPU runtime.</p>
+            </div>
+            <form id="process-form" class="form-stack">
+              <label class="field">
+                <span>Process Name</span>
+                <input id="process-name" type="text" placeholder="compiler" required />
+              </label>
+              <div class="split-fields">
+                <label class="field">
+                  <span>Memory</span>
+                  <input id="process-memory" type="number" min="1" value="32" required />
+                </label>
+                <label class="field">
+                  <span>CPU Ticks</span>
+                  <input id="process-cpu" type="number" min="1" value="5" required />
+                </label>
+              </div>
+              <button class="button button-primary" type="submit">Create Process</button>
+            </form>
+          </article>
+
+          <article class="surface control-card">
+            <div class="section-heading">
+              <h2>File Workspace</h2>
+              <p>Create and update files in the simulator file system.</p>
+            </div>
+            <form id="file-form" class="form-stack">
+              <label class="field">
+                <span>File Name</span>
+                <input id="file-name" type="text" placeholder="notes.txt" required />
+              </label>
+              <label class="field">
+                <span>File Content</span>
+                <textarea id="file-content" rows="5" placeholder="System notes"></textarea>
+              </label>
+              <div class="action-row">
+                <button class="button button-secondary" type="button" id="create-file">Create</button>
+                <button class="button button-primary" type="submit">Write</button>
+                <button class="button button-ghost" type="button" id="append-file">Append</button>
+              </div>
+            </form>
+          </article>
+        </aside>
+
+        <section class="main-grid">
+          <article class="surface panel-large">
+            <div class="section-heading">
+              <h2>Process Table</h2>
+              <p>Inspect state changes and trigger block, unblock, or terminate actions.</p>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>PID</th>
+                    <th>Name</th>
+                    <th>State</th>
+                    <th>Memory</th>
+                    <th>CPU Left</th>
+                    <th>I/O</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="process-table"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <div class="detail-grid">
+            <article class="surface panel-medium">
+              <div class="section-heading">
+                <h2>Memory Map</h2>
+                <p>Track used and free RAM without heavy visual effects.</p>
+              </div>
+              <div class="memory-summary">
+                <div class="mini-stat">
+                  <span>Used</span>
+                  <strong id="memory-used">0</strong>
+                </div>
+                <div class="mini-stat">
+                  <span>Free</span>
+                  <strong id="memory-free">0</strong>
+                </div>
+                <div class="mini-stat">
+                  <span>Total</span>
+                  <strong id="memory-total">256</strong>
+                </div>
+              </div>
+              <div class="memory-bar" id="memory-bar"></div>
+              <div class="memory-list" id="memory-list"></div>
+            </article>
+
+            <article class="surface panel-medium">
+              <div class="section-heading">
+                <h2>Files</h2>
+                <p>Browse the virtual file system and preview contents instantly.</p>
+              </div>
+              <div id="file-list" class="file-list"></div>
+              <div class="file-preview">
+                <div class="preview-header">
+                  <h3 id="preview-name">No file selected</h3>
+                  <span id="preview-meta">0 bytes</span>
+                </div>
+                <pre id="preview-content">Select a file from the list to view its contents.</pre>
+              </div>
+            </article>
+          </div>
+
+          <article class="surface panel-large">
+            <div class="section-heading">
+              <h2>Activity Feed</h2>
+              <p>Recent scheduler, memory, and file system events.</p>
+            </div>
+            <div id="flash-message" class="flash-message hidden"></div>
+            <div id="activity-log" class="activity-log"></div>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <script src="app_modern.js" defer></script>
+  </body>
+</html>
