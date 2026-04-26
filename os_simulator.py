@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import ceil
 from typing import Dict, List, Optional
 
 
 PROCESS_STATES = ("ready", "running", "waiting", "terminated")
+PAGE_SIZE_UNITS = 4096
+PHYSICAL_FRAME_COUNT = 16
+DISK_TRACK_COUNT = 64
+DISK_SECTORS_PER_TRACK = 8
+DISK_SEEK_INTERVAL_MS = 300
 
 
 @dataclass
@@ -51,40 +57,192 @@ class VirtualFile:
 
 
 @dataclass
-class MemoryManager:
-    total_memory: int
-    allocations: List[MemoryBlock] = field(default_factory=list)
+class PhysicalFrame:
+    frame_number: int
+    pid: Optional[int] = None
+    virtual_page: Optional[int] = None
+    last_access_tick: int = -1
 
-    def allocate(self, pid: int, size: int) -> Optional[MemoryBlock]:
-        if size <= 0 or size > self.total_memory:
+    @property
+    def status(self) -> str:
+        return "FREE" if self.pid is None else "OCCUPIED"
+
+
+class MemoryManager:
+    def __init__(
+        self,
+        total_memory: int = PAGE_SIZE_UNITS * PHYSICAL_FRAME_COUNT,
+        page_size: int = PAGE_SIZE_UNITS,
+        frame_count: int = PHYSICAL_FRAME_COUNT,
+    ) -> None:
+        self.page_size = page_size
+        self.frame_count = frame_count
+        self.total_memory = total_memory
+        self.frames: List[PhysicalFrame] = [PhysicalFrame(frame_number=index) for index in range(frame_count)]
+        self.page_tables: Dict[int, Dict[int, int]] = {}
+        self.process_page_counts: Dict[int, int] = {}
+        self.process_sizes: Dict[int, int] = {}
+        self.next_access_page: Dict[int, int] = {}
+        self.events: List[str] = []
+
+    @property
+    def allocations(self) -> List[MemoryBlock]:
+        return [
+            MemoryBlock(
+                pid=frame.pid,
+                start=frame.frame_number * self.page_size,
+                size=self.page_size,
+            )
+            for frame in self.frames
+            if frame.pid is not None
+        ]
+
+    def _append_event(self, message: str) -> None:
+        self.events.append(message)
+        if len(self.events) > 40:
+            self.events.pop(0)
+
+    def pages_required(self, size: int) -> int:
+        return max(1, ceil(size / self.page_size))
+
+    def allocate(self, pid: int, size: int, clock: int = 0) -> Optional[MemoryBlock]:
+        if size <= 0:
             return None
 
-        self.allocations.sort(key=lambda block: block.start)
-        cursor = 0
-        for block in self.allocations:
-            if cursor + size <= block.start:
-                new_block = MemoryBlock(pid=pid, start=cursor, size=size)
-                self.allocations.append(new_block)
-                self.allocations.sort(key=lambda item: item.start)
-                return new_block
-            cursor = block.end + 1
+        page_count = self.pages_required(size)
+        if page_count > self.frame_count:
+            self._append_event(
+                f"Allocation failed: PID {pid} needs {page_count} pages but only {self.frame_count} frames exist."
+            )
+            return None
 
-        if cursor + size <= self.total_memory:
-            new_block = MemoryBlock(pid=pid, start=cursor, size=size)
-            self.allocations.append(new_block)
-            self.allocations.sort(key=lambda item: item.start)
-            return new_block
+        self.page_tables[pid] = {}
+        self.process_page_counts[pid] = page_count
+        self.process_sizes[pid] = size
+        self.next_access_page[pid] = 0
 
-        return None
+        first_frame: Optional[PhysicalFrame] = None
+        for virtual_page in range(page_count):
+            frame = self._assign_frame(pid, virtual_page, clock, protected_pid=pid)
+            if frame is None:
+                self.free(pid)
+                self._append_event(f"Allocation failed: PID {pid} could not secure enough frames.")
+                return None
+            if first_frame is None:
+                first_frame = frame
+
+        self._append_event(f"Allocated {page_count} pages to PID {pid}.")
+        if first_frame is None:
+            return None
+        return MemoryBlock(pid=pid, start=first_frame.frame_number * self.page_size, size=size)
+
+    def _assign_frame(
+        self,
+        pid: int,
+        virtual_page: int,
+        clock: int,
+        protected_pid: Optional[int] = None,
+    ) -> Optional[PhysicalFrame]:
+        free_frame = next((frame for frame in self.frames if frame.pid is None), None)
+        if free_frame is None:
+            free_frame = self._evict_lru_frame(clock, protected_pid=protected_pid)
+        if free_frame is None:
+            return None
+
+        free_frame.pid = pid
+        free_frame.virtual_page = virtual_page
+        free_frame.last_access_tick = clock
+        self.page_tables.setdefault(pid, {})[virtual_page] = free_frame.frame_number
+        return free_frame
+
+    def _evict_lru_frame(self, clock: int, protected_pid: Optional[int] = None) -> Optional[PhysicalFrame]:
+        candidates = [frame for frame in self.frames if frame.pid is not None and frame.pid != protected_pid]
+        if not candidates:
+            candidates = [frame for frame in self.frames if frame.pid is not None]
+        if not candidates:
+            return None
+
+        victim = min(candidates, key=lambda frame: frame.last_access_tick)
+        victim_pid = victim.pid
+        victim_page = victim.virtual_page
+        if victim_pid is not None and victim_page is not None:
+            self.page_tables.get(victim_pid, {}).pop(victim_page, None)
+            self._append_event(
+                f"Page evicted: PID {victim_pid} virtual page {victim_page} -> frame {victim.frame_number} freed"
+            )
+        victim.pid = None
+        victim.virtual_page = None
+        victim.last_access_tick = clock
+        return victim
 
     def free(self, pid: int) -> None:
-        self.allocations = [block for block in self.allocations if block.pid != pid]
+        for frame in self.frames:
+            if frame.pid == pid:
+                frame.pid = None
+                frame.virtual_page = None
+                frame.last_access_tick = -1
+        self.page_tables.pop(pid, None)
+        self.process_page_counts.pop(pid, None)
+        self.process_sizes.pop(pid, None)
+        self.next_access_page.pop(pid, None)
+
+    def translate_address(self, pid: int, virtual_address: int, clock: int) -> Optional[int]:
+        if pid not in self.process_page_counts:
+            return None
+
+        virtual_page = virtual_address // self.page_size
+        offset = virtual_address % self.page_size
+        if virtual_page >= self.process_page_counts[pid]:
+            self._append_event(f"Invalid virtual address: PID {pid} address {virtual_address}")
+            return None
+
+        page_table = self.page_tables.setdefault(pid, {})
+        if virtual_page not in page_table:
+            self._append_event(f"Page fault: PID {pid} accessing virtual page {virtual_page}")
+            frame = self._assign_frame(pid, virtual_page, clock)
+            if frame is None:
+                return None
+
+        frame_number = page_table[virtual_page]
+        frame = self.frames[frame_number]
+        frame.last_access_tick = clock
+        return frame.frame_number * self.page_size + offset
+
+    def access_process(self, pid: int, clock: int) -> Optional[int]:
+        if pid not in self.process_page_counts:
+            return None
+        next_page = self.next_access_page.get(pid, 0) % self.process_page_counts[pid]
+        self.next_access_page[pid] = next_page + 1
+        return self.translate_address(pid, next_page * self.page_size, clock)
 
     def used_memory(self) -> int:
-        return sum(block.size for block in self.allocations)
+        return sum(self.page_size for frame in self.frames if frame.pid is not None)
 
     def free_memory(self) -> int:
         return self.total_memory - self.used_memory()
+
+    def process_memory_usage(self, pid: int) -> int:
+        return self.process_sizes.get(pid, 0)
+
+    def frame_snapshot(self) -> List[Dict[str, object]]:
+        return [
+            {
+                "frame_number": frame.frame_number,
+                "status": frame.status,
+                "pid": frame.pid,
+                "virtual_page": frame.virtual_page,
+            }
+            for frame in self.frames
+        ]
+
+    def page_table_snapshot(self) -> Dict[str, List[Dict[str, int]]]:
+        return {
+            str(pid): [
+                {"virtual_page": virtual_page, "frame_number": frame_number}
+                for virtual_page, frame_number in sorted(mappings.items())
+            ]
+            for pid, mappings in sorted(self.page_tables.items())
+        }
 
     def status_lines(self) -> List[str]:
         lines = [
@@ -96,12 +254,298 @@ class MemoryManager:
             lines.append("No active allocations.")
             return lines
 
-        lines.append("Allocations:")
-        for block in sorted(self.allocations, key=lambda item: item.start):
-            lines.append(
-                f"  PID {block.pid:<3} -> address {block.start:>3} to {block.end:>3} ({block.size} units)"
-            )
+        lines.append("Frames:")
+        for frame in self.frames:
+            if frame.pid is None:
+                lines.append(f"  Frame {frame.frame_number:<2} -> FREE")
+            else:
+                lines.append(
+                    f"  Frame {frame.frame_number:<2} -> PID {frame.pid:<3} page {frame.virtual_page}"
+                )
         return lines
+
+
+@dataclass
+class DiskRequest:
+    request_id: str
+    track: int
+    sector: int
+    operation: str
+    process_id: int
+    status: str = "PENDING"
+
+
+class DiskManager:
+    def __init__(
+        self,
+        track_count: int = DISK_TRACK_COUNT,
+        sectors_per_track: int = DISK_SECTORS_PER_TRACK,
+    ) -> None:
+        self.track_count = track_count
+        self.sectors_per_track = sectors_per_track
+        self.total_sectors = track_count * sectors_per_track
+        self.current_track = 0
+        self.current_sector = 0
+        self.direction = 1
+        self.pending_requests: List[DiskRequest] = []
+        self.completed_requests: List[DiskRequest] = []
+        self.seek_history: List[int] = [0]
+        self.movement_log: List[str] = []
+        self.files: Dict[str, List[tuple[int, int]]] = {}
+        self.sectors: List[Optional[str]] = [None] * self.total_sectors
+        self.next_request_id = 1
+
+    def _append_log(self, message: str) -> None:
+        self.movement_log.append(message)
+        if len(self.movement_log) > 40:
+            self.movement_log.pop(0)
+
+    def _sector_index(self, track: int, sector: int) -> int:
+        return track * self.sectors_per_track + sector
+
+    def _track_sector(self, index: int) -> tuple[int, int]:
+        return index // self.sectors_per_track, index % self.sectors_per_track
+
+    def _request_id(self) -> str:
+        request_id = f"REQ-{self.next_request_id:03d}"
+        self.next_request_id += 1
+        return request_id
+
+    def create_file(self, name: str, size_sectors: int) -> str:
+        if not name:
+            return "File name is required."
+        if name in self.files:
+            return f"File '{name}' already exists."
+        if size_sectors <= 0:
+            return "File size must be positive."
+
+        free_indices = [index for index, owner in enumerate(self.sectors) if owner is None]
+        if len(free_indices) < size_sectors:
+            return f"Not enough free disk sectors to create '{name}'."
+
+        allocation: List[int] = []
+        run_start = -1
+        run_length = 0
+        for index, owner in enumerate(self.sectors):
+            if owner is None:
+                if run_start == -1:
+                    run_start = index
+                    run_length = 1
+                else:
+                    run_length += 1
+                if run_length >= size_sectors:
+                    allocation = list(range(run_start, run_start + size_sectors))
+                    break
+            else:
+                run_start = -1
+                run_length = 0
+
+        if not allocation:
+            allocation = free_indices[:size_sectors]
+
+        sectors = [self._track_sector(index) for index in allocation]
+        for index in allocation:
+            self.sectors[index] = name
+        self.files[name] = sectors
+        message = f"Created file '{name}' using {size_sectors} sector(s)."
+        self._append_log(message)
+        return message
+
+    def delete_file(self, name: str) -> str:
+        if name not in self.files:
+            return f"File '{name}' does not exist."
+
+        for track, sector in self.files[name]:
+            self.sectors[self._sector_index(track, sector)] = None
+        del self.files[name]
+        message = f"Deleted file '{name}'."
+        self._append_log(message)
+        return message
+
+    def submit_disk_request(self, track: int, sector: int, operation: str, process_id: int) -> DiskRequest:
+        request = DiskRequest(
+            request_id=self._request_id(),
+            track=track,
+            sector=sector,
+            operation=operation.upper(),
+            process_id=process_id,
+        )
+        self.pending_requests.append(request)
+        self._append_log(
+            f"Queued {request.operation} request {request.request_id} for PID {process_id} at T{track}:S{sector}"
+        )
+        return request
+
+    def read_file(self, name: str, process_id: int) -> str:
+        if name not in self.files:
+            return f"File '{name}' does not exist."
+        for track, sector in self.files[name]:
+            self.submit_disk_request(track, sector, "READ", process_id)
+        return f"Queued READ requests for '{name}' from PID {process_id}."
+
+    def write_file(self, name: str, process_id: int) -> str:
+        if name not in self.files:
+            return f"File '{name}' does not exist."
+        for track, sector in self.files[name]:
+            self.submit_disk_request(track, sector, "WRITE", process_id)
+        return f"Queued WRITE requests for '{name}' from PID {process_id}."
+
+    def _peek_service_order(self) -> List[DiskRequest]:
+        if not self.pending_requests:
+            return []
+
+        requests = list(self.pending_requests)
+        if self.direction >= 0:
+            forward = sorted(
+                [request for request in requests if request.track >= self.current_track],
+                key=lambda item: (item.track, item.sector),
+            )
+            backward = sorted(
+                [request for request in requests if request.track < self.current_track],
+                key=lambda item: (item.track, item.sector),
+                reverse=True,
+            )
+            return forward + backward if forward else backward
+
+        backward = sorted(
+            [request for request in requests if request.track <= self.current_track],
+            key=lambda item: (item.track, item.sector),
+            reverse=True,
+        )
+        forward = sorted(
+            [request for request in requests if request.track > self.current_track],
+            key=lambda item: (item.track, item.sector),
+        )
+        return backward + forward if backward else forward
+
+    def process_seek_step(self) -> str:
+        if not self.pending_requests:
+            return "Disk idle."
+
+        target = self._peek_service_order()[0]
+        if target.track > self.current_track:
+            self.direction = 1
+            self.current_track += 1
+            self.current_sector = target.sector if self.current_track == target.track else self.current_sector
+            self.seek_history.append(self.current_track)
+            self.seek_history = self.seek_history[-20:]
+            message = f"Head moved to track {self.current_track}"
+            self._append_log(message)
+            return message
+
+        if target.track < self.current_track:
+            self.direction = -1
+            self.current_track -= 1
+            self.current_sector = target.sector if self.current_track == target.track else self.current_sector
+            self.seek_history.append(self.current_track)
+            self.seek_history = self.seek_history[-20:]
+            message = f"Head moved to track {self.current_track}"
+            self._append_log(message)
+            return message
+
+        self.current_sector = target.sector
+        target.status = "COMPLETED"
+        self.pending_requests = [request for request in self.pending_requests if request.request_id != target.request_id]
+        self.completed_requests.append(target)
+        self.seek_history.append(self.current_track)
+        self.seek_history = self.seek_history[-20:]
+        message = (
+            f"Serviced {target.operation} request {target.request_id} for PID {target.process_id} "
+            f"at T{target.track}:S{target.sector}"
+        )
+        self._append_log(message)
+        return message
+
+    def queue_snapshot(self) -> List[Dict[str, object]]:
+        return [
+            {
+                "request_id": request.request_id,
+                "track": request.track,
+                "sector": request.sector,
+                "operation": request.operation,
+                "process_id": request.process_id,
+                "status": request.status,
+            }
+            for request in self._peek_service_order()
+        ]
+
+    def completed_snapshot(self) -> List[Dict[str, object]]:
+        return [
+            {
+                "request_id": request.request_id,
+                "track": request.track,
+                "sector": request.sector,
+                "operation": request.operation,
+                "process_id": request.process_id,
+                "status": request.status,
+            }
+            for request in self.completed_requests[-20:]
+        ]
+
+    def fat_snapshot(self) -> Dict[str, List[Dict[str, int]]]:
+        return {
+            name: [{"track": track, "sector": sector} for track, sector in sectors]
+            for name, sectors in sorted(self.files.items())
+        }
+
+    def sector_snapshot(self) -> List[Dict[str, object]]:
+        snapshot: List[Dict[str, object]] = []
+        for index, owner in enumerate(self.sectors):
+            track, sector = self._track_sector(index)
+            snapshot.append(
+                {
+                    "track": track,
+                    "sector": sector,
+                    "filename": owner,
+                    "status": "FREE" if owner is None else "OCCUPIED",
+                }
+            )
+        return snapshot
+
+    def show_disk_queue(self) -> List[str]:
+        if not self.pending_requests:
+            return ["No pending disk requests."]
+        return [
+            f"{request.request_id} PID {request.process_id} {request.operation} T{request.track}:S{request.sector}"
+            for request in self._peek_service_order()
+        ]
+
+
+@dataclass
+class PrintJob:
+    job_id: str
+    document_name: str
+    size_pages: int
+    status: str = "QUEUED"
+
+
+class PrinterSpooler:
+    def __init__(self) -> None:
+        self.print_queue: List[PrintJob] = []
+        self.completed_jobs: List[PrintJob] = []
+
+    def submit_print_job(self, job_id: str, document_name: str, size_pages: int) -> str:
+        job = PrintJob(job_id=job_id, document_name=document_name, size_pages=size_pages)
+        self.print_queue.append(job)
+        return f"Queued print job {job_id}: {document_name} ({size_pages} pages)."
+
+    def process_print_job(self) -> str:
+        if not self.print_queue:
+            return "No pending print jobs."
+
+        job = self.print_queue.pop(0)
+        job.status = "COMPLETED"
+        self.completed_jobs.append(job)
+        return f"Printing: {job.document_name}, {job.size_pages} pages"
+
+    def show_print_queue(self) -> List[str]:
+        if not self.print_queue:
+            return ["No pending print jobs."]
+        return [
+            f"job_id={job.job_id} document_name={job.document_name} size_pages={job.size_pages}"
+            for job in self.print_queue
+        ]
+
 
 
 @dataclass
@@ -145,9 +589,15 @@ class FileSystem:
 
 
 class OperatingSystemSimulator:
-    def __init__(self, total_memory: int = 256, time_slice: int = 2) -> None:
+    def __init__(
+        self,
+        total_memory: int = PAGE_SIZE_UNITS * PHYSICAL_FRAME_COUNT,
+        time_slice: int = 2,
+    ) -> None:
         self.memory = MemoryManager(total_memory=total_memory)
         self.file_system = FileSystem()
+        self.disk_manager = DiskManager()
+        self.printer_spooler = PrinterSpooler()
         self.processes: Dict[int, Process] = {}
         self.ready_queue: List[int] = []
         self.running_pid: Optional[int] = None
@@ -169,12 +619,9 @@ class OperatingSystemSimulator:
             return "Memory and CPU time must both be positive integers."
 
         pid = self.next_pid
-        block = self.memory.allocate(pid=pid, size=memory_required)
+        block = self.memory.allocate(pid=pid, size=memory_required, clock=self.clock)
         if block is None:
-            return (
-                f"Failed to create process '{name}': not enough contiguous memory "
-                f"for {memory_required} units."
-            )
+            return f"Failed to create process '{name}': not enough memory for {memory_required} units."
 
         process = Process(
             pid=pid,
@@ -298,6 +745,7 @@ class OperatingSystemSimulator:
             return
 
         process = self.processes[self.running_pid]
+        self.memory.access_process(process.pid, self.clock)
         process.cpu_time_remaining -= 1
         self.slice_remaining -= 1
         messages.append(
@@ -368,6 +816,9 @@ Process management:
 Memory:
   memory status
 
+Disk:
+  disk queue
+
 Files and I/O:
   file create <name>
   file write <name> <content>
@@ -389,12 +840,12 @@ Notes:
 
 def run_demo(os_sim: OperatingSystemSimulator) -> List[str]:
     demo_output = [
-        os_sim.create_process("shell", 32, 5),
-        os_sim.create_process("editor", 48, 4),
-        os_sim.create_process("backup", 64, 6),
-        os_sim.file_system.create("notes.txt"),
-        os_sim.file_system.write("notes.txt", "OS simulator demo file."),
-        os_sim.block_process(2, 2, "disk"),
+        os_sim.create_process("shell", PAGE_SIZE_UNITS * 2, 5),
+        os_sim.create_process("editor", PAGE_SIZE_UNITS * 3, 4),
+        os_sim.create_process("backup", PAGE_SIZE_UNITS * 5, 6),
+        os_sim.disk_manager.create_file("report.bin", 6),
+        os_sim.disk_manager.write_file("report.bin", 2),
+        os_sim.printer_spooler.submit_print_job("JOB-1", "report.bin", 8),
     ]
     demo_output.extend(os_sim.tick(6))
     demo_output.extend(os_sim.system_status())
@@ -432,6 +883,8 @@ def execute_command(os_sim: OperatingSystemSimulator, command: str) -> List[str]
         return ["Invalid process command. Type 'help' for usage."]
     if main == "memory" and len(parts) == 2 and parts[1] == "status":
         return os_sim.memory.status_lines()
+    if main == "disk" and len(parts) == 2 and parts[1] == "queue":
+        return os_sim.disk_manager.show_disk_queue()
     if main == "file":
         if len(parts) == 3 and parts[1] == "create":
             return [os_sim.file_system.create(parts[2])]
