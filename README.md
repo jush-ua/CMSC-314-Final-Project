@@ -1,13 +1,14 @@
-# Operating System Simulator Website
+# Operating System Simulator
 
-This project now includes a browser-based dashboard for the Python operating system simulator. The site provides a cleaner UI for:
+This project is now a browser-only operating system simulator with a macOS-style desktop shell. It runs as a single webpage and includes:
 
-- process management
-- CPU scheduling with FCFS and round-robin
-- memory allocation tracking
-- file creation, writing, deletion, and inspection
+- process scheduling with Round Robin, Priority, and FCFS
+- paged memory management with fixed frames, LRU replacement, and per-process page tables
+- disk management with FAT allocation, LOOK disk head scheduling, and seek history
+- printer spooler processing with FIFO ordering and live job progress
+- an 8-step narrated presentation demo with HUD, spotlight, and pulse annotations
 
-## Run The Website
+## Run The Simulator
 
 ```powershell
 python web_server.py
@@ -15,26 +16,9 @@ python web_server.py
 
 Then open `http://127.0.0.1:8000` in your browser.
 
-## Optional CLI Version
+## Structure
 
-The original terminal simulator is still available:
-
-```powershell
-python os_simulator.py
-```
-
-## Website Features
-
-- top-level system summary cards
-- one-click tick controls and scheduler switching
-- process creation plus block, unblock, and terminate actions
-- memory usage bar with allocation details
-- virtual file workspace with preview panel
-- recent activity feed for scheduler and file system events
-
-## Notes
-
-- The simulator uses `256` memory units.
-- Round-robin uses a `2` tick time slice.
-- `Load Demo` seeds the system with sample processes and a file.
-- `Reset` clears the simulator back to an empty state.
+- `web/config.js` centralizes configurable constants
+- `web/core/` contains the simulator state machines
+- `web/ui/` contains the desktop shell, windows, panels, canvases, and demo controller
+- `web/main.js` bootstraps the application
