@@ -94,7 +94,7 @@ function buildShell(root) {
         <nav id="desktop-context-menu" class="context-menu hidden"></nav>
         <div id="mac-tooltip" class="mac-tooltip hidden"></div>
       </main>
-      <div class="dock-wrapper">
+      <div id="dock-wrapper" class="dock-wrapper">
         <div id="dock" class="dock"></div>
       </div>
       <input id="wallpaper-input" type="file" accept="image/*" hidden />
@@ -121,6 +121,7 @@ function collectElements(root) {
     launcherGrid: root.querySelector("#launcher-grid"),
     contextMenu: root.querySelector("#desktop-context-menu"),
     tooltip: root.querySelector("#mac-tooltip"),
+    dockWrapper: root.querySelector("#dock-wrapper"),
     dock: root.querySelector("#dock"),
     wallpaperInput: root.querySelector("#wallpaper-input"),
   };
@@ -287,6 +288,7 @@ function bootstrap() {
   const samples = createSamples({ scheduler, memory, disk, spooler, windowManager, requestRender });
   launcher = createLauncher({
     elements: {
+      dockWrapper: elements.dockWrapper,
       dock: elements.dock,
       overlay: elements.overlay,
       launcher: elements.launcher,

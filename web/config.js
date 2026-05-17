@@ -206,7 +206,7 @@ export const CONFIG = {
     },
     {
       id: "printer-manager",
-      title: "Printer Spooler",
+      title: "Printer",
       appName: "Print Center",
       accent: "#ff3b30",
       icon: APP_ICONS.spooler,

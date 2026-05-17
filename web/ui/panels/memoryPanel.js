@@ -7,6 +7,7 @@ export function createMemoryPanel({ container, memory, scheduler, tooltip, reque
   const state = {
     dirty: true,
   };
+  const tooltipUpdateHandlers = new Set();
 
   container.innerHTML = `
     <div class="panel-shell memory-panel">
@@ -64,6 +65,11 @@ export function createMemoryPanel({ container, memory, scheduler, tooltip, reque
     tooltip.classList.add("hidden");
   }
 
+  function clearTooltipHandlers() {
+    tooltipUpdateHandlers.forEach((handler) => handler.cancel?.());
+    tooltipUpdateHandlers.clear();
+  }
+
   function bindControls() {
     refs.access.addEventListener("click", () => {
       const pid = Number(refs.pid.value);
@@ -90,6 +96,8 @@ export function createMemoryPanel({ container, memory, scheduler, tooltip, reque
       return;
     }
     state.dirty = false;
+    clearTooltipHandlers();
+    hideTooltip();
     const snapshot = memory.getSnapshot();
     canvasRenderer.markDirty(snapshot);
     canvasRenderer.render();
@@ -102,9 +110,15 @@ export function createMemoryPanel({ container, memory, scheduler, tooltip, reque
       card.classList.toggle("eviction-flash", frame.flash === "eviction");
       card.style.background = frame.pid == null ? "#e5e5ea" : pidColor(frame.pid);
       card.innerHTML = `<strong>F${frame.frameNumber}</strong><span>${frame.pid == null ? "FREE" : `PID ${frame.pid}`}</span><span>${frame.virtualPage == null ? "" : `VP ${frame.virtualPage}`}</span>`;
-      card.addEventListener("mouseenter", (event) => showTooltip(`Frame ${frame.frameNumber} | ${frame.pid == null ? "FREE" : `PID ${frame.pid}, page ${frame.virtualPage}`}`, event));
-      card.addEventListener("mousemove", throttle((event) => showTooltip(`Frame ${frame.frameNumber} | ${frame.pid == null ? "FREE" : `PID ${frame.pid}, page ${frame.virtualPage}`}`, event), CONFIG.ui.tooltipMoveThrottleMs));
-      card.addEventListener("mouseleave", hideTooltip);
+      const tooltipText = `Frame ${frame.frameNumber} | ${frame.pid == null ? "FREE" : `PID ${frame.pid}, page ${frame.virtualPage}`}`;
+      const updateTooltip = throttle((event) => showTooltip(tooltipText, event), CONFIG.ui.tooltipMoveThrottleMs);
+      tooltipUpdateHandlers.add(updateTooltip);
+      card.addEventListener("mouseenter", updateTooltip);
+      card.addEventListener("mousemove", updateTooltip);
+      card.addEventListener("mouseleave", () => {
+        updateTooltip.cancel?.();
+        hideTooltip();
+      });
       return card;
     }));
     const pageTableEntries = Object.entries(snapshot.pageTables);

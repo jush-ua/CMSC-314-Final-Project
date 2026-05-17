@@ -417,6 +417,7 @@ export function createWindowManager({ bus, windowLayer, getDockIconRect, request
       id: model.id,
       windowState: model.windowState,
       active: state.activeWindowId === model.id,
+      maximized: Boolean(model.maximized),
     }));
   }
 

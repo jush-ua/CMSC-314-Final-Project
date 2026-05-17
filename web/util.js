@@ -5,7 +5,7 @@ export function throttle(fn, intervalMs) {
   let lastRun = 0;
   let scheduled = null;
 
-  return function throttled(...args) {
+  const throttled = function throttled(...args) {
     const now = Date.now();
     const timeSinceLastRun = now - lastRun;
 
@@ -27,6 +27,15 @@ export function throttle(fn, intervalMs) {
       }, timeUntilNextRun);
     }
   };
+
+  throttled.cancel = () => {
+    if (scheduled) {
+      clearTimeout(scheduled);
+      scheduled = null;
+    }
+  };
+
+  return throttled;
 }
 
 /**

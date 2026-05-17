@@ -119,6 +119,8 @@ export function createLauncher({ elements, windowManager, requestRender, samples
     }
     state.dirty = false;
     const windowStates = windowManager.getWindowStates();
+    const dockBehindWindows = windowStates.some((item) => item.active || item.maximized);
+    elements.dockWrapper?.classList.toggle("behind-windows", dockBehindWindows);
     windowStates.forEach((item) => {
       const button = state.dockButtons.get(item.id);
       if (!button) {
